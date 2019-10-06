@@ -1,0 +1,4 @@
+试试不同的手机（不同版本的webview）webview > 71 和 webview <= 71,看看缺少 driver 的时候，会不会自动下载
+当 driver 存在时，看看会不会跳过下载
+
+还可以试试不配置 capability 时，是否能正常工作

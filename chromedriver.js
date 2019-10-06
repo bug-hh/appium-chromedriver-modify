@@ -32,11 +32,23 @@ var _lodash = _interopRequireDefault(require("lodash"));
 
 var _path = _interopRequireDefault(require("path"));
 
+var _request = require("request");
+
+var _request_promise = require("request-promise")
+
+var _fs = require('fs')
+
 const log = _appiumSupport.logger.getLogger('Chromedriver');
 
+const MAPPING_FILE_NAME = 'chromeDriverMappingFile.json'
+const NEW_CD_VERSION_FORMAT_MAJOR_VERSION = 71;
 const DEFAULT_HOST = '127.0.0.1';
 const DEFAULT_PORT = 9515;
 const CHROMEDRIVER_CHROME_MAPPING = {
+  '76.0.3809.126': '76.0.3809',
+  '75.0.3770.140': '75.0.3770',
+  '74.0.3729.6': '74.0.3729',
+  '73.0.3683.68': '73.0.3683',
   '2.46': '71.0.3578',
   '2.45': '70.0.0',
   '2.44': '69.0.3497',
@@ -86,7 +98,8 @@ const CHROMEDRIVER_CHROME_MAPPING = {
   '2.0': '27.0.1453'
 };
 exports.CHROMEDRIVER_CHROME_MAPPING = CHROMEDRIVER_CHROME_MAPPING;
-const CHROME_BUNDLE_ID = 'com.android.chrome';
+// const CHROME_BUNDLE_ID = 'com.android.chrome';
+const CHROME_BUNDLE_ID = 'com.google.android.webview'
 const WEBVIEW_BUNDLE_IDS = ['com.google.android.webview', 'com.android.webview'];
 const CHROMEDRIVER_TUTORIAL = 'https://github.com/appium/appium/blob/master/docs/en/writing-running-appium/web/chromedriver.md';
 const CD_VER = process.env.npm_config_chromedriver_version || process.env.CHROMEDRIVER_VERSION || getMostRecentChromedriver();
@@ -137,10 +150,30 @@ class Chromedriver extends _events.default.EventEmitter {
     this.verbose = verbose;
     this.logPath = logPath;
     this.disableBuildCheck = !!disableBuildCheck;
+    this.WEBVIEW_VERSION = ""
+    this.cdToWebviewMapping = {}
+  }
+
+  async obtainChromedriverVersion(theUrl) {
+    var options = {
+        uri: theUrl,
+        qs: {
+             // -> uri + '?access_token=xxxxx%20xxxxx'
+        },
+        headers: {
+            'User-Agent': 'google chrome'
+        },
+        json: true // Automatically parses the JSON string in the response
+    };
+
+    let resp = await _request_promise(options);
+    return resp;
   }
 
   async getMapping() {
     let mapping = CHROMEDRIVER_CHROME_MAPPING;
+
+    let tempPath = this.mappingPath ? this.mappingPath : _path.default.resolve(__dirname, MAPPING_FILE_NAME) 
 
     if (this.mappingPath) {
       log.debug(`Attempting to use Chromedriver-Chrome mapping from '${this.mappingPath}'`);
@@ -157,8 +190,37 @@ class Chromedriver extends _events.default.EventEmitter {
       }
     }
 
+    // let cdToWebviewMapping = {}
+
     for (const [cdVersion, chromeVersion] of _lodash.default.toPairs(mapping)) {
       mapping[cdVersion] = _semver.default.coerce(chromeVersion);
+      this.cdToWebviewMapping[cdVersion] = chromeVersion
+    }
+
+    // 先获取手机 google webview 版本号, 这个只有前三位，没有最后一位
+    let chromeWebViewVersion = await this.getChromeVersion()
+    log.debug(`@@@@@@@@@@@@@  chromeWebViewVersion: ${chromeWebViewVersion}`)
+    let detailObj = _semver.default.coerce(chromeWebViewVersion);
+
+    let key = parseInt(detailObj.major) > NEW_CD_VERSION_FORMAT_MAJOR_VERSION ? chromeWebViewVersion : `${detailObj.major}.${detailObj.minor}`
+    if (parseInt(detailObj.major) > NEW_CD_VERSION_FORMAT_MAJOR_VERSION) {
+      // 对于 webview 版本在 71 以上的，chromedriver 版本号可以通过 google 提供的 url 查询
+      var url = `https://chromedriver.storage.googleapis.com/LATEST_RELEASE_${detailObj.raw}`
+      let query_result = await this.obtainChromedriverVersion(url);
+      // 使用查询以后得到的 chromedriver 版本号构造 Semver 对象
+      /* 对于 webview 在 71 以后的版本，存在多个版本的 webview 使用同一个 driver 的情况，
+         所以使用 webview 版本号为 key，映射 driver 版本号
+      */
+      this.WEBVIEW_VERSION = query_result
+      mapping[query_result] = _semver.default.coerce(query_result);
+      this.cdToWebviewMapping[query_result] = chromeWebViewVersion.raw
+
+      _fs.writeFile(tempPath, JSON.stringify(this.cdToWebviewMapping), (err) => {
+        if (err) {
+          log.error(err)
+          console.log(`Successfully Writting Mapping relation to ${_path.default.resolve(__dirname, MAPPING_FILE_NAME)}.`);
+        }
+      })
     }
 
     return mapping;
@@ -167,7 +229,7 @@ class Chromedriver extends _events.default.EventEmitter {
   async getChromedrivers(mapping) {
     const executables = await _appiumSupport.fs.glob(`${this.executableDir}/*`);
     log.debug(`Found ${executables.length} executable${executables.length === 1 ? '' : 's'} ` + `in '${this.executableDir}'`);
-    const cds = (await (0, _asyncbox.asyncmap)(executables, async function (executable) {
+    let cds = (await (0, _asyncbox.asyncmap)(executables, async function (executable) {
       const logError = ({
         message,
         stdout = null,
@@ -215,7 +277,8 @@ class Chromedriver extends _events.default.EventEmitter {
         });
       }
 
-      const versionObj = _semver.default.coerce(match[1], true);
+      let version = match[1]
+      const versionObj = _semver.default.coerce(version, true);
 
       if (!versionObj) {
         return logError({
@@ -225,7 +288,12 @@ class Chromedriver extends _events.default.EventEmitter {
         });
       }
 
-      const version = `${versionObj.major}.${versionObj.minor}`;
+      // const version = `${versionObj.major}.${versionObj.minor}`;
+
+      if (versionObj.major < NEW_CD_VERSION_FORMAT_MAJOR_VERSION) {
+        version = `${versionObj.major}.${versionObj.minor}`
+      }
+
       return {
         executable,
         version,
@@ -234,7 +302,9 @@ class Chromedriver extends _events.default.EventEmitter {
     })).filter(cd => !!cd).sort((a, b) => _semver.default.gte(_semver.default.coerce(b.version), _semver.default.coerce(a.version)) ? 1 : -1);
 
     if (_lodash.default.isEmpty(cds)) {
-      log.errorAndThrow(`No Chromedrivers found in '${this.executableDir}'`);
+      log.warn(`No Chromedrivers found in '${this.executableDir}'`);
+      // log.errorAndThrow(`No Chromedrivers found in '${this.executableDir}'`);
+      return []
     }
 
     log.debug(`The following Chromedriver executables were found:`);
@@ -273,6 +343,114 @@ class Chromedriver extends _events.default.EventEmitter {
     return chromeVersion ? _semver.default.coerce(chromeVersion) : null;
   }
 
+  async autoDownloadChromedriver(version, cds, mapping) {
+    for (let i = 0; i < cds.length; i++) {
+      log.debug(`    ${cds[i].executable} (minimum Chrome version '${cds[i].minCDVersion ? cds[i].minCDVersion : 'Unknown'}')`);
+      if (version == cds[i].minCDVersion.raw) {
+        log.debug('########### equal ##########')
+        return null;
+      }
+    }
+
+    for (let tempDV in this.cdToWebviewMapping) {
+      console.log(`dv: ${tempDV},   cd: ${this.cdToWebviewMapping[tempDV]}`)
+    }
+    console.log("     ")
+
+    var driverVersion = ""
+    console.log(`In autoDownloadChromedriver: version: ${version}`)
+    console.log(version)
+    for (var dv in this.cdToWebviewMapping) {
+      if (this.cdToWebviewMapping[dv] == version.raw) {
+        driverVersion = dv
+        break
+      }
+    }
+
+    log.debug(`Begin to download chromedriver ${driverVersion}`)
+
+    // await this.downloadChromedriver(driverVersion)
+    await this.downloadChromedriverByUsingBluebird(driverVersion, cds, mapping)
+    
+    log.debug('Downloading finished')
+    return driverVersion;
+  }
+
+  async downloadChromedriverByUsingBluebird(version, cds, mapping) {
+    var v = version.replace(/\./g, "_")
+    var url = `https://chromedriver.storage.googleapis.com/${version}/chromedriver_mac64.zip`
+    const archivesRoot = await _appiumSupport.tempDir.openDir();
+    let archivePath  = _fs.createWriteStream(_path.default.resolve(archivesRoot, `chromedriver${v}.zip`))
+    try {
+        await new _bluebird.default((resolve, reject) => {
+          (0, _request)(url).on('error', reject).on('response', res => {
+            if (res.statusCode >= 400) {
+              return reject(`Error downloading chromedriver at ${url}: ${res.statusCode}`);
+            }
+          }).pipe(archivePath).on('close', resolve);
+        });
+      } catch (e) {
+        const msg = `Cannot download chromedriver archive. Original error: ${e.message}`;
+        console.log(msg);
+        return false;
+      }
+
+      try {
+        const fileName = `Chromedriver_v${v}` + (_appiumSupport.system.isWindows() ? '.exe' : '');
+        const targetPath = _path.default.resolve(this.executableDir, fileName);
+        archivePath = _path.default.resolve(archivesRoot, `chromedriver${v}.zip`)
+        await this.unzipDriver(archivePath, targetPath);
+
+        let cd = {}
+        let vobj = _semver.default.coerce(version, true)
+        cd['executable'] = targetPath
+        cd['version'] = version
+        cd['minCDVersion'] = mapping[version]
+        cds.push(cd)
+
+      } catch (e) {
+        console.log(e.message);
+        return false;
+      } finally {
+          _appiumSupport.fs.rimraf(archivesRoot)
+      }
+  }
+
+  async unzipDriver(src, dst) {
+    const tmpRoot = await _appiumSupport.tempDir.openDir();
+    console.log(tmpRoot)
+    try {
+      await _appiumSupport.zip.extractAllTo(src, tmpRoot);
+      const allExtractedItems = await this.walkDir(tmpRoot);
+      const chromedriverPath = allExtractedItems.find(p => _path.default.parse(p).name === 'chromedriver');
+      if (!chromedriverPath) {
+        throw new Error('The archive was unzipped properly, but we could not find any chromedriver executable');
+      }
+
+      console.log(`Moving the extracted '${_path.default.basename(chromedriverPath)}' to '${dst}'`);
+      await _appiumSupport.fs.mv(chromedriverPath, dst, {
+        mkdirp: true
+      });
+    } finally {
+      await _appiumSupport.fs.rimraf(tmpRoot);
+    }
+  }
+
+  async walkDir(dir) {
+    const result = [];
+  
+    for (const name of await _appiumSupport.fs.readdir(dir)) {
+      const currentPath = _path.default.join(dir, name);
+  
+      result.push(currentPath);
+  
+      if ((await _appiumSupport.fs.stat(currentPath)).isDirectory()) {
+        result.push(...(await walkDir(currentPath)));
+      }
+    }
+    return result;
+  }
+
   async getCompatibleChromedriver() {
     if (!this.adb) {
       return await (0, _utils.getChromedriverBinaryPath)();
@@ -289,6 +467,26 @@ class Chromedriver extends _events.default.EventEmitter {
     }
 
     const chromeVersion = await this.getChromeVersion();
+    console.log("#############")
+    console.log(chromeVersion)
+    log.debug(`chromeVersion from this.getChromeVersion: ${chromeVersion}`)
+
+    let downloadedDriverVersion = await this.autoDownloadChromedriver(chromeVersion, cds, mapping)
+
+    if (downloadedDriverVersion !== null) {
+      log.debug("We have downloaded a new chromedriver, so update available chromedrivers list")
+      let tempCD = {}
+      
+      tempCD['executable'] = await _appiumSupport.fs.glob(`${this.executableDir}/${downloadedDriverVersion}`)
+      tempCD['version'] = downloadedDriverVersion
+      tempCD['minCDVersion'] = mapping[downloadedDriverVersion]
+
+      cds.push(tempCD)
+
+      for (let i = 0; i < cds.length; i++) {
+        log.debug(`    ${cds[i].executable} (minimum Chrome version '${cds[i].minCDVersion ? cds[i].minCDVersion : 'Unknown'}')`);
+      }
+    }
 
     if (!chromeVersion) {
       let cd = cds[0];
@@ -304,9 +502,14 @@ class Chromedriver extends _events.default.EventEmitter {
       return cd.executable;
     }
 
+    /*
+    sort((a, b) => _semver.default.gte(_semver.default.coerce(b.version), _semver.default.coerce(a.version)) ? 1 : -1)
+    */
     const workingCds = cds.filter(cd => {
-      return !_lodash.default.isUndefined(cd.minCDVersion) && _semver.default.gte(chromeVersion, cd.minCDVersion);
-    });
+      let vobj = _semver.default.coerce(cd.minCDVersion)
+      return cd['executable'] != '' && vobj && chromeVersion.major >= vobj.major
+      // return !_lodash.default.isUndefined(cd.minCDVersion) && _semver.default.gte(chromeVersion, cd.minCDVersion);
+    }).sort((a, b) => _semver.default.gte(_semver.default.coerce(b.version), _semver.default.coerce(a.version)) ? 1 : -1);
 
     if (_lodash.default.isEmpty(workingCds)) {
       log.errorAndThrow(`No Chromedriver found that can automate Chrome '${chromeVersion}'. ` + `See ${CHROMEDRIVER_TUTORIAL} for more details.`);

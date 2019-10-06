@@ -507,7 +507,7 @@ class Chromedriver extends _events.default.EventEmitter {
     */
     const workingCds = cds.filter(cd => {
       let vobj = _semver.default.coerce(cd.minCDVersion)
-      return vobj && chromeVersion.major >= vobj.major
+      return cd['executable'] != '' && vobj && chromeVersion.major >= vobj.major
       // return !_lodash.default.isUndefined(cd.minCDVersion) && _semver.default.gte(chromeVersion, cd.minCDVersion);
     }).sort((a, b) => _semver.default.gte(_semver.default.coerce(b.version), _semver.default.coerce(a.version)) ? 1 : -1);
 
